@@ -64,38 +64,26 @@ func New(ctx context.Context, address string, options ...Option) (*Client, error
 		return nil, errors.Wrap(err, "failed to establish network connection")
 	}
 
-	protocol, err := protocol.Handshake(ctx, conn, protocol.VersionOne)
+	protocol, err := protocol.NewProtocol(conn, protocol.VersionOne)
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
 
-	client := &Client{protocol: protocol}
-
-	return client, nil
+	return &Client{protocol: protocol}, nil
 }
 
 // Leader returns information about the current leader, if any.
 func (c *Client) Leader(ctx context.Context) (*NodeInfo, error) {
-	request := protocol.Message{}
-	request.Init(16)
-	response := protocol.Message{}
-	response.Init(512)
-
-	protocol.EncodeLeader(&request)
-
-	if err := c.protocol.Call(ctx, &request, &response); err != nil {
-		return nil, errors.Wrap(err, "failed to send Leader request")
-	}
-
-	id, address, err := protocol.DecodeNode(&response)
+	id, address, err := c.protocol.Leader(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to parse Node response")
 	}
 
-	info := &NodeInfo{ID: id, Address: address}
-
-	return info, nil
+	return &NodeInfo{
+		ID:      id,
+		Address: address,
+	}, nil
 }
 
 // Cluster returns information about all nodes in the cluster.

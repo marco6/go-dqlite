@@ -21,7 +21,6 @@ import (
 	"io"
 	"math"
 	"net"
-	"reflect"
 	"syscall"
 	"time"
 
@@ -280,17 +279,7 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		return nil, driverError(conn.log, errors.Wrap(err, "failed to create dqlite connection"))
 	}
 
-	conn.request.Init(4096)
-	conn.response.Init(4096)
-
-	protocol.EncodeOpen(&conn.request, c.uri, 0, "volatile")
-
-	if err := conn.protocol.Call(ctx, &conn.request, &conn.response); err != nil {
-		conn.protocol.Close()
-		return nil, driverError(conn.log, errors.Wrap(err, "failed to open database"))
-	}
-
-	conn.id, err = protocol.DecodeDb(&conn.response)
+	conn.id, err = conn.protocol.Open(ctx, c.uri, 0, "volatile")
 	if err != nil {
 		conn.protocol.Close()
 		return nil, driverError(conn.log, errors.Wrap(err, "failed to open database"))
@@ -347,8 +336,6 @@ var ErrNoAvailableLeader = protocol.ErrNoAvailableLeader
 type Conn struct {
 	log            client.LogFunc
 	protocol       *protocol.Protocol
-	request        protocol.Message
-	response       protocol.Message
 	id             uint32 // Database ID.
 	contextTimeout time.Duration
 	tracing        client.LogLevel
@@ -361,31 +348,25 @@ func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, e
 	ctx, span := tracing.Start(ctx, "dqlite.driver.PrepareContext", query)
 	defer span.End()
 
+	if c.tracing != client.LogNone {
+		start := time.Now()
+		defer func() {
+			c.log(c.tracing, "%.3fs request prepared: %q", time.Since(start).Seconds(), query)
+		}()
+	}
+
+	stmtId, params, err := c.protocol.Prepare(ctx, c.id, query)
+	if err != nil {
+		return nil, driverError(c.log, err)
+	}
+
 	stmt := &Stmt{
 		protocol: c.protocol,
-		request:  &c.request,
-		response: &c.response,
+		db:       c.id,
+		id:       stmtId,
+		params:   params,
 		log:      c.log,
 		tracing:  c.tracing,
-	}
-
-	protocol.EncodePrepare(&c.request, uint64(c.id), query)
-
-	var start time.Time
-	if c.tracing != client.LogNone {
-		start = time.Now()
-	}
-	err := c.protocol.Call(ctx, &c.request, &c.response)
-	if c.tracing != client.LogNone {
-		c.log(c.tracing, "%.3fs request prepared: %q", time.Since(start).Seconds(), query)
-	}
-	if err != nil {
-		return nil, driverError(c.log, err)
-	}
-
-	stmt.db, stmt.id, stmt.params, err = protocol.DecodeStmt(&c.response)
-	if err != nil {
-		return nil, driverError(c.log, err)
 	}
 
 	if c.tracing != client.LogNone {
@@ -407,31 +388,20 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 
 	if int64(len(args)) > math.MaxUint32 {
 		return nil, driverError(c.log, fmt.Errorf("too many parameters (%d)", len(args)))
-	} else if len(args) > math.MaxUint8 {
-		protocol.EncodeExecSQLV1(&c.request, uint64(c.id), query, args)
-	} else {
-		protocol.EncodeExecSQLV0(&c.request, uint64(c.id), query, args)
 	}
 
-	var start time.Time
 	if c.tracing != client.LogNone {
-		start = time.Now()
+		start := time.Now()
+		defer func() {
+			c.log(c.tracing, "%.3fs request exec: %q", time.Since(start).Seconds(), query)
+		}()
 	}
-	err := c.protocol.Call(ctx, &c.request, &c.response)
-	if c.tracing != client.LogNone {
-		c.log(c.tracing, "%.3fs request exec: %q", time.Since(start).Seconds(), query)
-	}
+
+	result, err := c.protocol.ExecSQL(ctx, c.id, query, args)
 	if err != nil {
 		return nil, driverError(c.log, err)
 	}
-
-	var result protocol.Result
-	result, err = protocol.DecodeResult(&c.response)
-	if err != nil {
-		return nil, driverError(c.log, err)
-	}
-
-	return &Result{result: result}, nil
+	return result, nil
 }
 
 // Query is an optional interface that may be implemented by a Conn.
@@ -446,38 +416,20 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 
 	if int64(len(args)) > math.MaxUint32 {
 		return nil, driverError(c.log, fmt.Errorf("too many parameters (%d)", len(args)))
-	} else if len(args) > math.MaxUint8 {
-		protocol.EncodeQuerySQLV1(&c.request, uint64(c.id), query, args)
-	} else {
-		protocol.EncodeQuerySQLV0(&c.request, uint64(c.id), query, args)
 	}
 
-	var start time.Time
 	if c.tracing != client.LogNone {
-		start = time.Now()
+		start := time.Now()
+		defer func() {
+			c.log(c.tracing, "%.3fs request query: %q", time.Since(start).Seconds(), query)
+		}()
 	}
-	err := c.protocol.Call(ctx, &c.request, &c.response)
-	if c.tracing != client.LogNone {
-		c.log(c.tracing, "%.3fs request query: %q", time.Since(start).Seconds(), query)
-	}
+
+	rows, err := c.protocol.QuerySQL(ctx, c.id, query, args)
 	if err != nil {
 		return nil, driverError(c.log, err)
 	}
-
-	var rows protocol.Rows
-	rows, err = protocol.DecodeRows(&c.response)
-	if err != nil {
-		return nil, driverError(c.log, err)
-	}
-
-	return &Rows{
-		ctx:      ctx,
-		request:  &c.request,
-		response: &c.response,
-		protocol: c.protocol,
-		rows:     rows,
-		log:      c.log,
-	}, nil
+	return rows, nil
 }
 
 // Exec is an optional interface that may be implemented by a Conn.
@@ -567,8 +519,6 @@ func (tx *Tx) Rollback() error {
 // used by multiple goroutines concurrently.
 type Stmt struct {
 	protocol *protocol.Protocol
-	request  *protocol.Message
-	response *protocol.Message
 	db       uint32
 	id       uint32
 	params   uint64
@@ -579,18 +529,10 @@ type Stmt struct {
 
 // Close closes the statement.
 func (s *Stmt) Close() error {
-	protocol.EncodeFinalize(s.request, s.db, s.id)
-
-	ctx := context.Background()
-
-	if err := s.protocol.Call(ctx, s.request, s.response); err != nil {
+	err := s.protocol.Finalize(context.Background(), s.db, s.id)
+	if err != nil {
 		return driverError(s.log, err)
 	}
-
-	if err := protocol.DecodeEmpty(s.response); err != nil {
-		return driverError(s.log, err)
-	}
-
 	return nil
 }
 
@@ -609,31 +551,20 @@ func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (drive
 
 	if int64(len(args)) > math.MaxUint32 {
 		return nil, driverError(s.log, fmt.Errorf("too many parameters (%d)", len(args)))
-	} else if len(args) > math.MaxUint8 {
-		protocol.EncodeExecV1(s.request, s.db, s.id, args)
-	} else {
-		protocol.EncodeExecV0(s.request, s.db, s.id, args)
 	}
 
 	var start time.Time
 	if s.tracing != client.LogNone {
 		start = time.Now()
+		defer func() {
+			s.log(s.tracing, "%.3fs request prepared: %q", time.Since(start).Seconds(), s.sql)
+		}()
 	}
-	err := s.protocol.Call(ctx, s.request, s.response)
-	if s.tracing != client.LogNone {
-		s.log(s.tracing, "%.3fs request prepared: %q", time.Since(start).Seconds(), s.sql)
-	}
+	result, err := s.protocol.Exec(ctx, s.db, s.id, args)
 	if err != nil {
 		return nil, driverError(s.log, err)
 	}
-
-	var result protocol.Result
-	result, err = protocol.DecodeResult(s.response)
-	if err != nil {
-		return nil, driverError(s.log, err)
-	}
-
-	return &Result{result: result}, nil
+	return result, nil
 }
 
 // Exec executes a query that doesn't return rows, such
@@ -651,165 +582,25 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 
 	if int64(len(args)) > math.MaxUint32 {
 		return nil, driverError(s.log, fmt.Errorf("too many parameters (%d)", len(args)))
-	} else if len(args) > math.MaxUint8 {
-		protocol.EncodeQueryV1(s.request, s.db, s.id, args)
-	} else {
-		protocol.EncodeQueryV0(s.request, s.db, s.id, args)
 	}
 
-	var start time.Time
 	if s.tracing != client.LogNone {
-		start = time.Now()
+		start := time.Now()
+		defer func() {
+			s.log(s.tracing, "%.3fs request prepared: %q", time.Since(start).Seconds(), s.sql)
+		}()
 	}
-	err := s.protocol.Call(ctx, s.request, s.response)
-	if s.tracing != client.LogNone {
-		s.log(s.tracing, "%.3fs request prepared: %q", time.Since(start).Seconds(), s.sql)
-	}
+
+	rows, err := s.protocol.Query(ctx, s.db, s.id, args)
 	if err != nil {
 		return nil, driverError(s.log, err)
 	}
-
-	var rows protocol.Rows
-	rows, err = protocol.DecodeRows(s.response)
-	if err != nil {
-		return nil, driverError(s.log, err)
-	}
-
-	return &Rows{
-		ctx:      ctx,
-		request:  s.request,
-		response: s.response,
-		protocol: s.protocol,
-		rows:     rows,
-		log:      s.log,
-	}, nil
+	return rows, nil
 }
 
 // Query executes a query that may return rows, such as a
 func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	return s.QueryContext(context.Background(), valuesToNamedValues(args))
-}
-
-// Result is the result of a query execution.
-type Result struct {
-	result protocol.Result
-}
-
-// LastInsertId returns the database's auto-generated ID
-// after, for example, an INSERT into a table with primary
-// key.
-func (r *Result) LastInsertId() (int64, error) {
-	return int64(r.result.LastInsertID), nil
-}
-
-// RowsAffected returns the number of rows affected by the
-// query.
-func (r *Result) RowsAffected() (int64, error) {
-	return int64(r.result.RowsAffected), nil
-}
-
-// Rows is an iterator over an executed query's results.
-type Rows struct {
-	ctx      context.Context
-	protocol *protocol.Protocol
-	request  *protocol.Message
-	response *protocol.Message
-	rows     protocol.Rows
-	consumed bool
-	types    []string
-	log      client.LogFunc
-}
-
-// Columns returns the names of the columns. The number of
-// columns of the result is inferred from the length of the
-// slice. If a particular column name isn't known, an empty
-// string should be returned for that entry.
-func (r *Rows) Columns() []string {
-	return r.rows.Columns
-}
-
-// Close closes the rows iterator.
-func (r *Rows) Close() error {
-	err := r.rows.Close()
-
-	// If we consumed the whole result set, there's nothing to do as
-	// there's no pending response from the server.
-	if r.consumed {
-		return nil
-	}
-
-	// If there is was a single-response result set, we're done.
-	if err == io.EOF {
-		return nil
-	}
-
-	// Let's issue an interrupt request and wait until we get an empty
-	// response, signalling that the query was interrupted.
-	if err := r.protocol.Interrupt(r.ctx, r.request, r.response); err != nil {
-		return driverError(r.log, err)
-	}
-
-	return nil
-}
-
-// Next is called to populate the next row of data into
-// the provided slice. The provided slice will be the same
-// size as the Columns() are wide.
-//
-// Next should return io.EOF when there are no more rows.
-func (r *Rows) Next(dest []driver.Value) error {
-	err := r.rows.Next(dest)
-
-	if err == protocol.ErrRowsPart {
-		r.rows.Close()
-		if err := r.protocol.More(r.ctx, r.response); err != nil {
-			return driverError(r.log, err)
-		}
-		rows, err := protocol.DecodeRows(r.response)
-		if err != nil {
-			return driverError(r.log, err)
-		}
-		r.rows = rows
-		return r.rows.Next(dest)
-	}
-
-	if err == io.EOF {
-		r.consumed = true
-	}
-
-	return err
-}
-
-// ColumnTypeScanType implements RowsColumnTypeScanType.
-func (r *Rows) ColumnTypeScanType(i int) reflect.Type {
-	// column := sql.NewColumn(r.rows, i)
-
-	// typ, err := r.protocol.ColumnTypeScanType(context.Background(), column)
-	// if err != nil {
-	// 	return nil
-	// }
-
-	// return typ.DriverType()
-	return nil
-}
-
-// ColumnTypeDatabaseTypeName implements RowsColumnTypeDatabaseTypeName.
-// warning: not thread safe
-func (r *Rows) ColumnTypeDatabaseTypeName(i int) string {
-	if r.types == nil {
-		var err error
-		r.types, err = r.rows.ColumnTypes()
-		// an error might not matter if we get our types
-		if err != nil && i >= len(r.types) {
-			// a panic here doesn't really help,
-			// as an empty column type is not the end of the world
-			// but we should still inform the user of the failure
-			const msg = "row (%p) error returning column #%d type: %v\n"
-			r.log(client.LogWarn, msg, r, i, err)
-			return ""
-		}
-	}
-	return r.types[i]
 }
 
 // Convert a driver.Value slice into a driver.NamedValue slice.

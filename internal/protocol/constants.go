@@ -19,21 +19,44 @@ const (
 	Spare   = NodeRole(2)
 )
 
-// SQLite datatype codes
+type ColumnType uint8
+
 const (
-	Integer = 1
-	Float   = 2
-	Text    = 3
-	Blob    = 4
-	Null    = 5
+	// SQLite datatype codes
+	Integer ColumnType = 1
+	Float   ColumnType = 2
+	Text    ColumnType = 3
+	Blob    ColumnType = 4
+	Null    ColumnType = 5
+
+	// Special data types for time values.
+	UnixTime ColumnType = 9
+	ISO8601  ColumnType = 10
+	Boolean  ColumnType = 11
 )
 
-// Special data types for time values.
-const (
-	UnixTime = 9
-	ISO8601  = 10
-	Boolean  = 11
-)
+func (t ColumnType) String() string {
+	switch t {
+	case Integer:
+		return "INTEGER"
+	case Float:
+		return "FLOAT"
+	case Blob:
+		return "BLOB"
+	case Text:
+		return "TEXT"
+	case Null:
+		return "NULL"
+	case UnixTime:
+		return "TIME"
+	case ISO8601:
+		return "TIME"
+	case Boolean:
+		return "BOOL"
+	default:
+		return ""
+	}
+}
 
 // Request types.
 const (

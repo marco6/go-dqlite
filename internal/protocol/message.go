@@ -167,19 +167,19 @@ func (m *Message) putNamedValuesInner(values NamedValues) {
 
 		switch values[i].Value.(type) {
 		case int64:
-			m.putUint8(Integer)
+			m.putUint8(uint8(Integer))
 		case float64:
-			m.putUint8(Float)
+			m.putUint8(uint8(Float))
 		case bool:
-			m.putUint8(Boolean)
+			m.putUint8(uint8(Boolean))
 		case []byte:
-			m.putUint8(Blob)
+			m.putUint8(uint8(Blob))
 		case string:
-			m.putUint8(Text)
+			m.putUint8(uint8(Text))
 		case nil:
-			m.putUint8(Null)
+			m.putUint8(uint8(Null))
 		case time.Time:
-			m.putUint8(ISO8601)
+			m.putUint8(uint8(ISO8601))
 		default:
 			panic("unsupported value type")
 		}
@@ -323,7 +323,7 @@ func (m *Message) getBlob() []byte {
 	size := m.getUint64()
 	data := make([]byte, size)
 	b := m.bufferForGet()
-	defer b.Advance(int(alignUp(size, messageWordSize)))
+	defer b.Advance(alignUp(int(size), messageWordSize))
 	copy(data, b.Bytes[b.Offset:])
 	return data
 }
@@ -393,8 +393,8 @@ func (m *Message) getNodes() Nodes {
 // Decode a statement result object from the message body.
 func (m *Message) getResult() Result {
 	return Result{
-		LastInsertID: m.getUint64(),
-		RowsAffected: m.getUint64(),
+		lastInsertId: m.getInt64(),
+		rowsAffected: m.getInt64(),
 	}
 }
 
@@ -445,9 +445,14 @@ func (m *Message) bufferForGet() *buffer {
 
 // Result holds the result of a statement.
 type Result struct {
-	LastInsertID uint64
-	RowsAffected uint64
+	lastInsertId int64
+	rowsAffected int64
 }
+
+var _ driver.Result = &Result{}
+
+func (r *Result) LastInsertId() (int64, error) { return r.lastInsertId, nil }
+func (r *Result) RowsAffected() (int64, error) { return r.rowsAffected, nil }
 
 // Rows holds a result set encoded in a message body.
 type Rows struct {
@@ -534,7 +539,7 @@ func (r *Rows) Next(dest []driver.Value) error {
 	}
 
 	for i := range types {
-		switch types[i] {
+		switch ColumnType(types[i]) {
 		case Integer:
 			dest[i] = r.message.getInt64()
 		case Float:
@@ -631,6 +636,8 @@ const (
 	messageMaxConsecutiveEmptyReads = 100
 )
 
+const iso8601Strict = "2006-01-02 15:04:05.000000000-07:00"
+
 var iso8601Formats = []string{
 	// By default, store timestamps with whatever timezone they come with.
 	// When parsed, they will be returned with the same timezone.
@@ -651,32 +658,17 @@ func (r *Rows) ColumnTypes() ([]string, error) {
 	kinds := make([]string, len(types))
 
 	for i, t := range types {
-		switch t {
-		case Integer:
-			kinds[i] = "INTEGER"
-		case Float:
-			kinds[i] = "FLOAT"
-		case Blob:
-			kinds[i] = "BLOB"
-		case Text:
-			kinds[i] = "TEXT"
-		case Null:
-			kinds[i] = "NULL"
-		case UnixTime:
-			kinds[i] = "TIME"
-		case ISO8601:
-			kinds[i] = "TIME"
-		case Boolean:
-			kinds[i] = "BOOL"
-		default:
+		kind := ColumnType(t).String()
+		if kind == "" {
 			return nil, fmt.Errorf("unknown data type: %d", t)
 		}
+		kinds[i] = kind
 	}
 
 	return kinds, err
 }
 
 // alignUp rounds n up to a multiple of a. a must be a power of 2.
-func alignUp(n, a uint64) uint64 {
+func alignUp(n, a int) int {
 	return (n + a - 1) &^ (a - 1)
 }

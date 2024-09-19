@@ -2,8 +2,11 @@ package protocol
 
 import (
 	"context"
+	"database/sql/driver"
 	"encoding/binary"
+	"fmt"
 	"io"
+	"math"
 	"net"
 	"sync"
 	"time"
@@ -13,21 +16,38 @@ import (
 
 // Protocol sends and receive the dqlite message on the wire.
 type Protocol struct {
-	version uint64        // Protocol version
-	conn    net.Conn      // Underlying network connection.
+	version uint64   // Protocol version
+	conn    net.Conn // Underlying network connection. TODO: remove. This belongs to `Conn`
+	reader  *messageReader
+	writer  *messageWriter
 	closeCh chan struct{} // Stops the heartbeat when the connection gets closed
 	mu      sync.Mutex    // Serialize requests
 	netErr  error         // A network error occurred
 }
 
-func newProtocol(version uint64, conn net.Conn) *Protocol {
+func NewProtocol(conn net.Conn, version uint64) (*Protocol, error) {
+	writer := NewMessageWriter(conn)
+	if err := writer.writeUint64(version); err != nil {
+		return nil, err
+	}
+	if err := writer.writer.Flush(); err != nil {
+		return nil, err
+	}
+
 	protocol := &Protocol{
 		version: version,
 		conn:    conn,
+		// FIXME: I think that the best size here depends on the type of the
+		// underlying connection. If it is a local thing, then page size (4KiB)
+		// is probably the right choice. However, I would bet the right buffer
+		// size for networking would be the MTU size (or maybe the max payload
+		// size for the IP packet) or some multiple of it.
+		reader:  NewMessageReader(conn),
+		writer:  writer,
 		closeCh: make(chan struct{}),
 	}
 
-	return protocol
+	return protocol, nil
 }
 
 // Call invokes a dqlite RPC, sending a request message and receiving a
@@ -61,31 +81,34 @@ func (p *Protocol) Call(ctx context.Context, request, response *Message) (err er
 		defer p.conn.SetDeadline(time.Time{})
 	}
 
-	desc := requestDesc(request.mtype)
-
 	if err = p.send(request); err != nil {
-		return errors.Wrapf(err, "call %s (budget %s): send", desc, budget)
+		return errors.Wrapf(err, "call %s (budget %s): send", requestDesc(request.mtype), budget)
 	}
 
 	if err = p.recv(response); err != nil {
-		return errors.Wrapf(err, "call %s (budget %s): receive", desc, budget)
+		return errors.Wrapf(err, "call %s (budget %s): receive", requestDesc(request.mtype), budget)
 	}
 
 	return
 }
 
-// More is used when a request maps to multiple responses.
-func (p *Protocol) More(ctx context.Context, response *Message) error {
-	return p.recv(response)
-}
-
-// Interrupt sends an interrupt request and awaits for the server's empty
-// response.
-func (p *Protocol) Interrupt(ctx context.Context, request *Message, response *Message) error {
-	// We need to take a lock since the dqlite server currently does not
-	// support concurrent requests.
+func (p *Protocol) Leader(ctx context.Context) (id uint64, address string, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if p.netErr != nil {
+		return 0, "", p.netErr
+	}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		switch errors.Cause(err).(type) {
+		case *net.OpError:
+			p.netErr = err
+		}
+	}()
 
 	// Honor the ctx deadline, if present.
 	if deadline, ok := ctx.Deadline(); ok {
@@ -93,25 +116,265 @@ func (p *Protocol) Interrupt(ctx context.Context, request *Message, response *Me
 		defer p.conn.SetDeadline(time.Time{})
 	}
 
-	EncodeInterrupt(request, 0)
-
-	if err := p.send(request); err != nil {
-		return errors.Wrap(err, "failed to send interrupt request")
+	if err := p.writer.WriteLeader(); err != nil {
+		return 0, "", err
 	}
 
-	for {
-		if err := p.recv(response); err != nil {
-			return errors.Wrap(err, "failed to receive response")
+	if p.version == VersionLegacy {
+		address, err := p.reader.ReadNodeLegacy()
+		if err != nil {
+			return 0, "", err
 		}
-
-		mtype, _ := response.getHeader()
-
-		if mtype == ResponseEmpty {
-			break
-		}
+		return 0, address, err
 	}
 
-	return nil
+	return p.reader.ReadNode()
+}
+
+func (p *Protocol) RegisterClient(ctx context.Context, id uint64) (heartbeatTimeout uint64, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.netErr != nil {
+		return 0, p.netErr
+	}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		switch errors.Cause(err).(type) {
+		case *net.OpError:
+			p.netErr = err
+		}
+	}()
+
+	// Honor the ctx deadline, if present.
+	if deadline, ok := ctx.Deadline(); ok {
+		p.conn.SetDeadline(deadline)
+		defer p.conn.SetDeadline(time.Time{})
+	}
+
+	if err := p.writer.WriteClient(id); err != nil {
+		return 0, err
+	}
+
+	return p.reader.ReadWelcome()
+}
+
+func (p *Protocol) QuerySQL(ctx context.Context, db uint32, query string, args []driver.NamedValue) (rows *RowsReader, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.netErr != nil {
+		return nil, p.netErr
+	}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		switch errors.Cause(err).(type) {
+		case *net.OpError:
+			p.netErr = err
+		}
+	}()
+
+	// Honor the ctx deadline, if present.
+	if deadline, ok := ctx.Deadline(); ok {
+		p.conn.SetDeadline(deadline)
+		defer p.conn.SetDeadline(time.Time{})
+	}
+
+	if int64(len(args)) > math.MaxUint32 {
+		return nil, fmt.Errorf("too many parameters (%d)", len(args))
+	}
+
+	if err := p.writer.WriteQuerySQL(db, query, args); err != nil {
+		return nil, err
+	}
+
+	return p.reader.ReadRows()
+}
+
+func (p *Protocol) ExecSQL(ctx context.Context, db uint32, query string, args []driver.NamedValue) (result *Result, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.netErr != nil {
+		return nil, p.netErr
+	}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		switch errors.Cause(err).(type) {
+		case *net.OpError:
+			p.netErr = err
+		}
+	}()
+
+	// Honor the ctx deadline, if present.
+	if deadline, ok := ctx.Deadline(); ok {
+		p.conn.SetDeadline(deadline)
+		defer p.conn.SetDeadline(time.Time{})
+	}
+
+	if int64(len(args)) > math.MaxUint32 {
+		return nil, fmt.Errorf("too many parameters (%d)", len(args))
+	}
+
+	if err := p.writer.WriteExecSQL(db, query, args); err != nil {
+		return nil, err
+	}
+
+	return p.reader.ReadResult()
+}
+
+func (p *Protocol) Query(ctx context.Context, db, query uint32, args []driver.NamedValue) (rows *RowsReader, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.netErr != nil {
+		return nil, p.netErr
+	}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		switch errors.Cause(err).(type) {
+		case *net.OpError:
+			p.netErr = err
+		}
+	}()
+
+	// Honor the ctx deadline, if present.
+	if deadline, ok := ctx.Deadline(); ok {
+		p.conn.SetDeadline(deadline)
+		defer p.conn.SetDeadline(time.Time{})
+	}
+
+	if int64(len(args)) > math.MaxUint32 {
+		return nil, fmt.Errorf("too many parameters (%d)", len(args))
+	}
+
+	if err := p.writer.WriteQuery(db, query, args); err != nil {
+		return nil, err
+	}
+
+	return p.reader.ReadRows()
+}
+
+func (p *Protocol) Exec(ctx context.Context, db, query uint32, args []driver.NamedValue) (result *Result, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.netErr != nil {
+		return nil, p.netErr
+	}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		switch errors.Cause(err).(type) {
+		case *net.OpError:
+			p.netErr = err
+		}
+	}()
+
+	// Honor the ctx deadline, if present.
+	if deadline, ok := ctx.Deadline(); ok {
+		p.conn.SetDeadline(deadline)
+		defer p.conn.SetDeadline(time.Time{})
+	}
+
+	if int64(len(args)) > math.MaxUint32 {
+		return nil, fmt.Errorf("too many parameters (%d)", len(args))
+	}
+
+	if err := p.writer.WriteExec(db, query, args); err != nil {
+		return nil, err
+	}
+
+	return p.reader.ReadResult()
+}
+
+func (p *Protocol) Open(ctx context.Context, name string, flags uint64, vfs string) (dbId uint32, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.netErr != nil {
+		return 0, p.netErr
+	}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		switch errors.Cause(err).(type) {
+		case *net.OpError:
+			p.netErr = err
+		}
+	}()
+
+	if err := p.writer.WriteOpen(name, flags, vfs); err != nil {
+		return 0, err
+	}
+
+	return p.reader.ReadDb()
+}
+
+func (p *Protocol) Prepare(ctx context.Context, db uint32, sql string) (id uint32, args uint64, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.netErr != nil {
+		return 0, 0, p.netErr
+	}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		switch errors.Cause(err).(type) {
+		case *net.OpError:
+			p.netErr = err
+		}
+	}()
+
+	if err := p.writer.WritePrepare(db, sql); err != nil {
+		return 0, 0, err
+	}
+
+	return p.reader.ReadStmt()
+}
+
+func (p *Protocol) Finalize(ctx context.Context, dbId, stmtId uint32) (err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.netErr != nil {
+		return p.netErr
+	}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		switch errors.Cause(err).(type) {
+		case *net.OpError:
+			p.netErr = err
+		}
+	}()
+
+	if err := p.writer.WriteFinalize(dbId, stmtId); err != nil {
+		return err
+	}
+
+	return p.reader.ReadAck()
 }
 
 // Close the client connection.
@@ -236,63 +499,6 @@ func (p *Protocol) recvFill(buf []byte) (int, error) {
 	}
 	return -1, io.ErrNoProgress
 }
-
-/*
-func (p *Protocol) heartbeat() {
-	request := Message{}
-	request.Init(16)
-	response := Message{}
-	response.Init(512)
-
-	for {
-		delay := c.heartbeatTimeout / 3
-
-		//c.logger.Debug("sending heartbeat", zap.Duration("delay", delay))
-		time.Sleep(delay)
-
-		// Check if we've been closed.
-		select {
-		case <-c.closeCh:
-			return
-		default:
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-
-		EncodeHeartbeat(&request, uint64(time.Now().Unix()))
-
-		err := c.Call(ctx, &request, &response)
-
-		// We bail out upon failures.
-		//
-		// TODO: make the client survive temporary disconnections.
-		if err != nil {
-			cancel()
-			//c.logger.Error("heartbeat failed", zap.Error(err))
-			return
-		}
-
-		//addresses, err := DecodeNodes(&response)
-		_, err = DecodeNodes(&response)
-		if err != nil {
-			cancel()
-			//c.logger.Error("invalid heartbeat response", zap.Error(err))
-			return
-		}
-
-		// if err := c.store.Set(ctx, addresses); err != nil {
-		// 	cancel()
-		// 	c.logger.Error("failed to update servers", zap.Error(err))
-		// 	return
-		// }
-
-		cancel()
-
-		request.Reset()
-		response.Reset()
-	}
-}
-*/
 
 // DecodeNodeCompat handles also pre-1.0 legacy server messages.
 func DecodeNodeCompat(protocol *Protocol, response *Message) (uint64, string, error) {

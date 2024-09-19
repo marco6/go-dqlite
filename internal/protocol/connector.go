@@ -2,7 +2,6 @@ package protocol
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -178,7 +177,7 @@ func (c *Connector) connectAttemptAll(ctx context.Context, log logging.Func) (*P
 			ctx, cancel := context.WithTimeout(ctx, c.config.AttemptTimeout)
 			defer cancel()
 
-			protocol, leader, err := c.connectAttemptOne(origCtx, ctx, server.Address, log)
+			protocol, leader, err := c.connectAttemptOne(origCtx, ctx, server.Address)
 			if err != nil {
 				// This server is unavailable, try with the next target.
 				log(logging.Warn, err.Error())
@@ -205,7 +204,7 @@ func (c *Connector) connectAttemptAll(ctx context.Context, log logging.Func) (*P
 			ctx, cancel = context.WithTimeout(ctx, c.config.AttemptTimeout)
 			defer cancel()
 
-			protocol, _, err = c.connectAttemptOne(origCtx, ctx, leader, log)
+			protocol, _, err = c.connectAttemptOne(origCtx, ctx, leader)
 			if err != nil {
 				// The leader reported by the previous server is
 				// unavailable, try with the next target.
@@ -238,30 +237,6 @@ func (c *Connector) connectAttemptAll(ctx context.Context, log logging.Func) (*P
 	return protocol, nil
 }
 
-// Perform the initial handshake using the given protocol version.
-func Handshake(ctx context.Context, conn net.Conn, version uint64) (*Protocol, error) {
-	// Latest protocol version.
-	protocol := make([]byte, 8)
-	binary.LittleEndian.PutUint64(protocol, version)
-
-	// Honor the ctx deadline, if present.
-	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(deadline)
-		defer conn.SetDeadline(time.Time{})
-	}
-
-	// Perform the protocol handshake.
-	n, err := conn.Write(protocol)
-	if err != nil {
-		return nil, errors.Wrap(err, "write handshake")
-	}
-	if n != 8 {
-		return nil, errors.Wrap(io.ErrShortWrite, "short handshake write")
-	}
-
-	return newProtocol(version, conn), nil
-}
-
 // Connect to the given dqlite server and check if it's the leader.
 //
 // dialCtx is used for net.Dial; ctx is used for all other requests.
@@ -276,7 +251,6 @@ func (c *Connector) connectAttemptOne(
 	dialCtx context.Context,
 	ctx context.Context,
 	address string,
-	log logging.Func,
 ) (*Protocol, string, error) {
 	dialCtx, cancel := context.WithTimeout(dialCtx, c.config.DialTimeout)
 	defer cancel()
@@ -287,27 +261,14 @@ func (c *Connector) connectAttemptOne(
 		return nil, "", errors.Wrap(err, "dial")
 	}
 
-	version := VersionOne
-	protocol, err := Handshake(ctx, conn, version)
-	if err == errBadProtocol {
-		log(logging.Warn, "unsupported protocol %d, attempt with legacy", version)
-		version = VersionLegacy
-		protocol, err = Handshake(ctx, conn, version)
-	}
+	protocol, err := NewProtocol(conn, VersionOne)
 	if err != nil {
 		conn.Close()
 		return nil, "", err
 	}
 
-	// Send the initial Leader request.
-	request := Message{}
-	request.Init(16)
-	response := Message{}
-	response.Init(512)
-
-	EncodeLeader(&request)
-
-	if err := protocol.Call(ctx, &request, &response); err != nil {
+	_, leader, err := protocol.Leader(ctx)
+	if err != nil {
 		protocol.Close()
 		cause := errors.Cause(err)
 		// Best-effort detection of a pre-1.0 dqlite node: when sent
@@ -319,31 +280,13 @@ func (c *Connector) connectAttemptOne(
 		return nil, "", err
 	}
 
-	_, leader, err := DecodeNodeCompat(protocol, &response)
-	if err != nil {
-		protocol.Close()
-		return nil, "", err
-	}
-
 	switch leader {
 	case "":
 		// Currently this server does not know about any leader.
 		protocol.Close()
 		return nil, "", nil
 	case address:
-		// This server is the leader, register ourselves and return.
-		request.reset()
-		response.reset()
-
-		EncodeClient(&request, c.id)
-
-		if err := protocol.Call(ctx, &request, &response); err != nil {
-			protocol.Close()
-			return nil, "", err
-		}
-
-		_, err := DecodeWelcome(&response)
-		if err != nil {
+		if _, err := protocol.RegisterClient(ctx, c.id); err != nil {
 			protocol.Close()
 			return nil, "", err
 		}

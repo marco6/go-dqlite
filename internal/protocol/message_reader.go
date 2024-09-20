@@ -137,35 +137,106 @@ func (mr *messageReader) ReadAck() error {
 	return mr.discardRemaining()
 }
 
+func (mr *messageReader) ReadClusterV1() (Nodes, error) {
+	_, err := mr.readHeader(ResponseNodes)
+	if err != nil {
+		return nil, err
+	}
+	n, err := mr.readUint64()
+	if err != nil {
+		return nil, err
+	}
+	servers := make(Nodes, n)
+	for i := 0; i < int(n); i++ {
+		id, err := mr.readUint64()
+		if err != nil {
+			return nil, err
+		}
+		address, err := mr.readString()
+		if err != nil {
+			return nil, err
+		}
+		role, err := mr.readUint64()
+		if err != nil {
+			return nil, err
+		}
+
+		servers[i].ID = id
+		servers[i].Address = address
+		servers[i].Role = NodeRole(role)
+	}
+
+	return servers, nil
+}
+
+func (mr *messageReader) ReadFiles() ([]File, error) {
+	_, err := mr.readHeader(ResponseFiles)
+	if err != nil {
+		return nil, err
+	}
+	n, err := mr.readUint64()
+	if err != nil {
+		return nil, err
+	}
+	files := make([]File, n)
+	for i := range files {
+		name, err := mr.readString()
+		if err != nil {
+			return nil, err
+		}
+		data, err := mr.readBlob()
+		if err != nil {
+			return nil, err
+		}
+		files[i] = File{
+			Name: name,
+			Data: data,
+		}
+	}
+
+	return files, nil
+}
+
+func (mr *messageReader) ReadMetadataV0() (*NodeMetadata, error) {
+	_, err := mr.readHeader(ResponseMetadata)
+	if err != nil {
+		return nil, err
+	}
+
+	failureDomain, err := mr.readUint64()
+	if err != nil {
+		return nil, err
+	}
+	weight, err := mr.readUint64()
+	if err != nil {
+		return nil, err
+	}
+
+	return &NodeMetadata{
+		FailureDomain: failureDomain,
+		Weight:        weight,
+	}, nil
+}
+
 func (mr *messageReader) readHeader(requiredType uint8) (uint8, error) {
 	if *mr.limit != 0 {
 		return 0, fmt.Errorf("unread message in stream")
 	}
 	*mr.limit = messageHeaderSize
-
-	words, err := mr.readUint32()
+	buff, err := mr.reader.Peek(8)
 	if err != nil {
 		return 0, err
 	}
-	mtype, err := mr.reader.ReadByte()
-	if err != nil {
-		return 0, err
-	}
-	schema, err := mr.reader.ReadByte()
-	if err != nil {
-		return 0, err
-	}
-	err = mr.discardPadding()
-	if err != nil {
-		return 0, err
-	}
+	words := binary.LittleEndian.Uint32(buff)
+	mtype, schema := buff[4], buff[5]
+	mr.reader.Discard(8) // Can't fail
 	*mr.limit = int64(words) * messageWordSize
 
 	if mtype == ResponseFailure {
 		return 0, mr.readError()
 	}
 	if mtype != requiredType {
-		return 0, fmt.Errorf("decode %s: unexpected type %d", responseDesc(ResponseStmt), mtype)
+		return 0, fmt.Errorf("decode %s: unexpected type %s", responseDesc(requiredType), responseDesc(mtype))
 	}
 
 	return schema, nil
@@ -185,37 +256,6 @@ func (mr *messageReader) readError() error {
 		Description: descr,
 	}
 }
-
-// func (mr *messageReader) readHeader() (mtype uint8, schema uint8, err error) {
-// 	if *mr.limit != 0 {
-// 		return 0, 0, fmt.Errorf("unread message in stream")
-// 	}
-// 	*mr.limit = messageHeaderSize
-
-// 	var words uint32
-// 	words, err = mr.readUint32()
-// 	if err != nil {
-// 		return
-// 	}
-
-// 	mtype, err = mr.reader.ReadByte()
-// 	if err != nil {
-// 		return
-// 	}
-
-// 	schema, err = mr.reader.ReadByte()
-// 	if err != nil {
-// 		return
-// 	}
-
-// 	err = mr.discardPadding()
-// 	if err != nil {
-// 		return
-// 	}
-
-// 	*mr.limit = int64(words) * messageWordSize
-// 	return
-// }
 
 func (mr *messageReader) readColumnNames() ([]string, error) {
 	n, err := mr.readUint64()
@@ -255,20 +295,25 @@ func (mr *messageReader) readEndMarker() (bool, error) {
 }
 
 func (mr *messageReader) readTypes(types []ColumnType) error {
-	for i := 0; i < len(types); i++ {
-		b, err := mr.reader.ReadByte()
-		if err != nil {
-			return err
+	typesSize := alignUp((len(types)+1)/2, messageWordSize)
+	buff, err := mr.reader.Peek(typesSize)
+	if err != nil {
+		return err
+	}
+
+	i := 0
+	for _, b := range buff {
+		if i < len(types) {
+			types[i] = ColumnType(b & 0x0f)
 		}
-		types[i] = ColumnType(b & 0x0f)
 		i++
 		if i < len(types) {
 			types[i] = ColumnType(b >> 4)
 		}
+		i++
 	}
-	if err := mr.discardPadding(); err != nil {
-		return err
-	}
+
+	mr.reader.Discard(typesSize) // Can't fail
 	return nil
 }
 
@@ -365,24 +410,6 @@ func (mr *messageReader) readUint32() (uint32, error) {
 	result := binary.LittleEndian.Uint32(buff)
 	mr.reader.Discard(4) // Can't fail.
 	return result, nil
-}
-
-func (mr *messageReader) readUint16() (uint16, error) {
-	buff, err := mr.reader.Peek(2)
-	if err != nil {
-		return 0, err
-	}
-	result := binary.LittleEndian.Uint16(buff)
-	mr.reader.Discard(2) // Can't fail.
-	return result, nil
-}
-
-func (mr *messageReader) readInt32() (int32, error) {
-	v, err := mr.readUint32()
-	if err != nil {
-		return 0, err
-	}
-	return int32(v), nil
 }
 
 func (mr *messageReader) readFloat64() (float64, error) {

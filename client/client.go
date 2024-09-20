@@ -88,64 +88,26 @@ func (c *Client) Leader(ctx context.Context) (*NodeInfo, error) {
 
 // Cluster returns information about all nodes in the cluster.
 func (c *Client) Cluster(ctx context.Context) ([]NodeInfo, error) {
-	request := protocol.Message{}
-	request.Init(16)
-	response := protocol.Message{}
-	response.Init(512)
-
-	protocol.EncodeCluster(&request, protocol.ClusterFormatV1)
-
-	if err := c.protocol.Call(ctx, &request, &response); err != nil {
+	nodes, err := c.protocol.Cluster(ctx)
+	if err != nil {
 		return nil, errors.Wrap(err, "failed to send Cluster request")
 	}
-
-	servers, err := protocol.DecodeNodes(&response)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to parse Node response")
-	}
-
-	return servers, nil
+	return nodes, nil
 }
 
 // File holds the content of a single database file.
-type File struct {
-	Name string
-	Data []byte
-}
+type File = protocol.File
 
 // Dump the content of the database with the given name. Two files will be
 // returned, the first is the main database file (which has the same name as
 // the database), the second is the WAL file (which has the same name as the
 // database plus the suffix "-wal").
 func (c *Client) Dump(ctx context.Context, dbname string) ([]File, error) {
-	request := protocol.Message{}
-	request.Init(16)
-	response := protocol.Message{}
-	response.Init(512)
-
-	protocol.EncodeDump(&request, dbname)
-
-	if err := c.protocol.Call(ctx, &request, &response); err != nil {
+	files, err := c.protocol.Dump(ctx, dbname)
+	if err != nil {
 		return nil, errors.Wrap(err, "failed to send dump request")
 	}
-
-	files, err := protocol.DecodeFiles(&response)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to parse files response")
-	}
-	defer files.Close()
-
-	dump := make([]File, 0)
-
-	for {
-		name, data := files.Next()
-		if name == "" {
-			break
-		}
-		dump = append(dump, File{Name: name, Data: data})
-	}
-
-	return dump, nil
+	return files, nil
 }
 
 // Add a node to a cluster.
@@ -154,20 +116,9 @@ func (c *Client) Dump(ctx context.Context, dbname string) ([]File, error) {
 // desired role is Voter, the node being added must be online, since it will be
 // granted voting rights only once it catches up with the leader's log.
 func (c *Client) Add(ctx context.Context, node NodeInfo) error {
-	request := protocol.Message{}
-	response := protocol.Message{}
-
-	request.Init(4096)
-	response.Init(4096)
-
-	protocol.EncodeAdd(&request, node.ID, node.Address)
-
-	if err := c.protocol.Call(ctx, &request, &response); err != nil {
-		return err
-	}
-
-	if err := protocol.DecodeEmpty(&response); err != nil {
-		return err
+	err := c.protocol.Add(ctx, node.ID, node.Address)
+	if err != nil {
+		return nil
 	}
 
 	// If the desired role is spare, there's nothing to do, since all newly
@@ -190,118 +141,36 @@ func (c *Client) Add(ctx context.Context, node NodeInfo) error {
 // If the target node does not exist or has already the desired role, an error
 // is returned.
 func (c *Client) Assign(ctx context.Context, id uint64, role NodeRole) error {
-	request := protocol.Message{}
-	response := protocol.Message{}
-
-	request.Init(4096)
-	response.Init(4096)
-
-	protocol.EncodeAssign(&request, id, uint64(role))
-
-	if err := c.protocol.Call(ctx, &request, &response); err != nil {
-		return err
-	}
-
-	if err := protocol.DecodeEmpty(&response); err != nil {
-		return err
-	}
-
-	return nil
+	return c.protocol.Assign(ctx, id, uint64(role))
 }
 
 // Transfer leadership from the current leader to another node.
 //
 // This must be invoked one client connected to the current leader.
 func (c *Client) Transfer(ctx context.Context, id uint64) error {
-	request := protocol.Message{}
-	response := protocol.Message{}
-
-	request.Init(4096)
-	response.Init(4096)
-
-	protocol.EncodeTransfer(&request, id)
-
-	if err := c.protocol.Call(ctx, &request, &response); err != nil {
-		return err
-	}
-
-	if err := protocol.DecodeEmpty(&response); err != nil {
-		return err
-	}
-
-	return nil
+	return c.protocol.Transfer(ctx, id)
 }
 
 // Remove a node from the cluster.
 func (c *Client) Remove(ctx context.Context, id uint64) error {
-	request := protocol.Message{}
-	request.Init(4096)
-	response := protocol.Message{}
-	response.Init(4096)
-
-	protocol.EncodeRemove(&request, id)
-
-	if err := c.protocol.Call(ctx, &request, &response); err != nil {
-		return err
-	}
-
-	if err := protocol.DecodeEmpty(&response); err != nil {
-		return err
-	}
-
-	return nil
+	return c.protocol.Remove(ctx, id)
 }
 
 // NodeMetadata user-defined node-level metadata.
-type NodeMetadata struct {
-	FailureDomain uint64
-	Weight        uint64
-}
+type NodeMetadata = protocol.NodeMetadata
 
 // Describe returns metadata about the node we're connected with.
 func (c *Client) Describe(ctx context.Context) (*NodeMetadata, error) {
-	request := protocol.Message{}
-	request.Init(4096)
-	response := protocol.Message{}
-	response.Init(4096)
-
-	protocol.EncodeDescribe(&request, protocol.RequestDescribeFormatV0)
-
-	if err := c.protocol.Call(ctx, &request, &response); err != nil {
-		return nil, err
-	}
-
-	domain, weight, err := protocol.DecodeMetadata(&response)
+	metadata, err := c.protocol.Describe(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	metadata := &NodeMetadata{
-		FailureDomain: domain,
-		Weight:        weight,
-	}
-
 	return metadata, nil
 }
 
 // Weight updates the weight associated to the node we're connected with.
 func (c *Client) Weight(ctx context.Context, weight uint64) error {
-	request := protocol.Message{}
-	request.Init(4096)
-	response := protocol.Message{}
-	response.Init(4096)
-
-	protocol.EncodeWeight(&request, weight)
-
-	if err := c.protocol.Call(ctx, &request, &response); err != nil {
-		return err
-	}
-
-	if err := protocol.DecodeEmpty(&response); err != nil {
-		return err
-	}
-
-	return nil
+	return c.protocol.Weight(ctx, weight)
 }
 
 // Close the client.

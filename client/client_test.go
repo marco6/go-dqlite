@@ -51,18 +51,12 @@ func TestClient_Dump(t *testing.T) {
 	response := protocol.Message{}
 	response.Init(4096)
 
-	protocol.EncodeOpen(&request, "test.db", 0, "volatile")
-
 	p := client.Protocol()
-	err = p.Call(ctx, &request, &response)
+
+	db, err := p.Open(ctx, "test.db", 0, "volatile")
 	require.NoError(t, err)
 
-	db, err := protocol.DecodeDb(&response)
-	require.NoError(t, err)
-
-	protocol.EncodeExecSQLV0(&request, uint64(db), "CREATE TABLE foo (n INT)", nil)
-
-	err = p.Call(ctx, &request, &response)
+	_, err = p.ExecSQL(ctx, db, "CREATE TABLE foo (n INT)", nil)
 	require.NoError(t, err)
 
 	files, err := client.Dump(ctx, "test.db")

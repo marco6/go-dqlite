@@ -33,16 +33,13 @@ import (
 
 // Test sending a request that needs to be written into the dynamic buffer.
 func TestProtocol_RequestWithDynamicBuffer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
 	p, cleanup := newProtocol(t)
 	defer cleanup()
 
-	request, response := newMessagePair(64, 64)
-
-	protocol.EncodeOpen(&request, "test.db", 0, "test-0")
-
-	makeCall(t, p, &request, &response)
-
-	id, err := protocol.DecodeDb(&response)
+	id, err := p.Open(ctx, "test.db", 0, "test-0")
 	require.NoError(t, err)
 
 	sql := `
@@ -51,29 +48,21 @@ CREATE TABLE bar (n INT);
 CREATE TABLE egg (n INT);
 CREATE TABLE baz (n INT);
 `
-	protocol.EncodeExecSQLV0(&request, uint64(id), sql, nil)
-
-	makeCall(t, p, &request, &response)
+	_, err = p.ExecSQL(ctx, id, sql, nil)
+	require.NoError(t, err)
 }
 
 func TestProtocol_Prepare(t *testing.T) {
-	c, cleanup := newProtocol(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	p, cleanup := newProtocol(t)
 	defer cleanup()
 
-	request, response := newMessagePair(64, 64)
-
-	protocol.EncodeOpen(&request, "test.db", 0, "test-0")
-
-	makeCall(t, c, &request, &response)
-
-	db, err := protocol.DecodeDb(&response)
+	db, err := p.Open(ctx, "test.db", 0, "test-0")
 	require.NoError(t, err)
 
-	protocol.EncodePrepare(&request, uint64(db), "CREATE TABLE test (n INT)")
-
-	makeCall(t, c, &request, &response)
-
-	_, stmt, params, err := protocol.DecodeStmt(&response)
+	stmt, params, err := p.Prepare(ctx, db, "CREATE TABLE test (n INT)")
 	require.NoError(t, err)
 
 	assert.Equal(t, uint32(0), stmt)
@@ -166,24 +155,4 @@ func newProtocol(t *testing.T) (*protocol.Protocol, func()) {
 	}
 
 	return client, cleanup
-}
-
-// Perform a client call.
-func makeCall(t *testing.T, p *protocol.Protocol, request, response *protocol.Message) {
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-	defer cancel()
-
-	err := p.Call(ctx, request, response)
-	require.NoError(t, err)
-}
-
-// Return a new message pair to be used as request and response.
-func newMessagePair(size1, size2 int) (protocol.Message, protocol.Message) {
-	message1 := protocol.Message{}
-	message1.Init(size1)
-
-	message2 := protocol.Message{}
-	message2.Init(size2)
-
-	return message1, message2
 }

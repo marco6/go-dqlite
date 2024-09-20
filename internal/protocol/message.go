@@ -21,6 +21,11 @@ type NamedValues32 = []driver.NamedValue
 // generate decoding logic for the heartbeat response.
 type Nodes []NodeInfo
 
+type NodeMetadata struct {
+	FailureDomain uint64
+	Weight        uint64
+}
+
 // Message holds data about a single request or response.
 type Message struct {
 	words  uint32
@@ -336,14 +341,6 @@ func (m *Message) getUint8() uint8 {
 	return b.Bytes[b.Offset]
 }
 
-// Read a 2-byte word from the message body.
-func (m *Message) getUint16() uint16 {
-	b := m.bufferForGet()
-	defer b.Advance(2)
-
-	return binary.LittleEndian.Uint16(b.Bytes[b.Offset:])
-}
-
 // Read a 4-byte word from the message body.
 func (m *Message) getUint32() uint32 {
 	b := m.bufferForGet()
@@ -609,6 +606,11 @@ func (r *Rows) Close() error {
 type Files struct {
 	n       uint64
 	message *Message
+}
+
+type File struct {
+	Name string
+	Data []byte
 }
 
 func (f *Files) Next() (string, []byte) {

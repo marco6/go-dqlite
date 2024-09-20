@@ -21,6 +21,23 @@ func NewMessageWriter(writer io.Writer) *messageWriter {
 	}
 }
 
+func (mw *messageWriter) WriteAdd(id uint64, address string) error {
+	messageSize := 8 + // id
+		alignUp(len(address)+1, messageWordSize)
+
+	if err := mw.writeHeader(messageSize, RequestAdd, 0); err != nil {
+		return err
+	}
+	if err := mw.writeUint64(uint64(id)); err != nil {
+		return err
+	}
+	if err := mw.writeString(address); err != nil {
+		return err
+	}
+
+	return mw.writer.Flush()
+}
+
 func (mw *messageWriter) WriteLeader() error {
 	const messageSize = messageWordSize
 	err := mw.writeHeader(messageSize, RequestLeader, 0)
@@ -35,12 +52,95 @@ func (mw *messageWriter) WriteLeader() error {
 	return mw.writer.Flush()
 }
 
+func (mw *messageWriter) WriteTransfer(id uint64) error {
+	const messageSize = messageWordSize
+	if err := mw.writeHeader(messageSize, RequestTransfer, 0); err != nil {
+		return err
+	}
+	if err := mw.writeUint64(id); err != nil {
+		return err
+	}
+	return mw.writer.Flush()
+}
+
+func (mw *messageWriter) WriteCluster(formatVersion uint64) error {
+	const messageSize = messageWordSize
+	if err := mw.writeHeader(messageSize, RequestCluster, 0); err != nil {
+		return err
+	}
+	if err := mw.writeUint64(formatVersion); err != nil {
+		return err
+	}
+	return mw.writer.Flush()
+}
+
+func (mw *messageWriter) WriteDescribe(formatVersion uint64) error {
+	const messageSize = messageWordSize
+	if err := mw.writeHeader(messageSize, RequestDescribe, 0); err != nil {
+		return err
+	}
+	if err := mw.writeUint64(formatVersion); err != nil {
+		return err
+	}
+	return mw.writer.Flush()
+}
+
+func (mw *messageWriter) WriteAssign(id uint64, role uint64) error {
+	const messageSize = 2 * messageWordSize
+	if err := mw.writeHeader(messageSize, RequestAssign, 0); err != nil {
+		return err
+	}
+
+	if err := mw.writeUint64(id); err != nil {
+		return err
+	}
+	if err := mw.writeUint64(role); err != nil {
+		return err
+	}
+
+	return mw.writer.Flush()
+}
+
+func (mw *messageWriter) WriteRemove(id uint64) error {
+	const messageSize = messageWordSize
+	if err := mw.writeHeader(messageSize, RequestRemove, 0); err != nil {
+		return err
+	}
+	if err := mw.writeUint64(id); err != nil {
+		return err
+	}
+	return mw.writer.Flush()
+}
+
+func (mw *messageWriter) WriteWeight(weight uint64) error {
+	const messageSize = messageWordSize
+	if err := mw.writeHeader(messageSize, RequestWeight, 0); err != nil {
+		return err
+	}
+	if err := mw.writeUint64(weight); err != nil {
+		return err
+	}
+	return mw.writer.Flush()
+}
+
 func (mw *messageWriter) WriteClient(id uint64) error {
 	const messageSize = messageWordSize
 	if err := mw.writeHeader(messageSize, RequestClient, 0); err != nil {
 		return err
 	}
 	if err := mw.writeUint64(id); err != nil {
+		return err
+	}
+
+	return mw.writer.Flush()
+}
+
+func (mw *messageWriter) WriteDump(name string) error {
+	messageSize := alignUp(len(name)+1, messageWordSize)
+	if err := mw.writeHeader(messageSize, RequestDump, 0); err != nil {
+		return err
+	}
+	if err := mw.writeString(name); err != nil {
 		return err
 	}
 
@@ -318,10 +418,6 @@ func (mw *messageWriter) writeUint32(v uint32) error {
 	buff = binary.LittleEndian.AppendUint32(buff, v)
 	_, err := mw.writer.Write(buff)
 	return err
-}
-
-func (mw *messageWriter) writeInt32(v int32) error {
-	return mw.writeUint32(uint32(v))
 }
 
 func (mw *messageWriter) writeFloat64(v float64) error {

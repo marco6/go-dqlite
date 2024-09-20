@@ -8,6 +8,13 @@ import (
 // NodeRole identifies the role of a node.
 type NodeRole int
 
+// Node roles
+const (
+	Voter   NodeRole = 0
+	StandBy NodeRole = 1
+	Spare   NodeRole = 2
+)
+
 // String implements the Stringer interface.
 func (r NodeRole) String() string {
 	switch r {

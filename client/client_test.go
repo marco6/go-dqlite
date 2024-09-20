@@ -10,7 +10,6 @@ import (
 
 	dqlite "github.com/canonical/go-dqlite"
 	"github.com/canonical/go-dqlite/client"
-	"github.com/canonical/go-dqlite/internal/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,13 +42,6 @@ func TestClient_Dump(t *testing.T) {
 	client, err := client.New(ctx, node.BindAddress())
 	require.NoError(t, err)
 	defer client.Close()
-
-	// Open a database and create a test table.
-	request := protocol.Message{}
-	request.Init(4096)
-
-	response := protocol.Message{}
-	response.Init(4096)
 
 	p := client.Protocol()
 

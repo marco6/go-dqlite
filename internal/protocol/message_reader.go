@@ -218,7 +218,7 @@ func (mr *messageReader) ReadMetadataV0() (*NodeMetadata, error) {
 	}, nil
 }
 
-func (mr *messageReader) readHeader(requiredType uint8) (uint8, error) {
+func (mr *messageReader) readHeader(requiredType ResponseType) (uint8, error) {
 	if *mr.limit != 0 {
 		return 0, fmt.Errorf("unread message in stream")
 	}
@@ -228,7 +228,7 @@ func (mr *messageReader) readHeader(requiredType uint8) (uint8, error) {
 		return 0, err
 	}
 	words := binary.LittleEndian.Uint32(buff)
-	mtype, schema := buff[4], buff[5]
+	mtype, schema := ResponseType(buff[4]), buff[5]
 	mr.reader.Discard(8) // Can't fail
 	*mr.limit = int64(words) * messageWordSize
 
@@ -236,7 +236,7 @@ func (mr *messageReader) readHeader(requiredType uint8) (uint8, error) {
 		return 0, mr.readError()
 	}
 	if mtype != requiredType {
-		return 0, fmt.Errorf("decode %s: unexpected type %s", responseDesc(requiredType), responseDesc(mtype))
+		return 0, fmt.Errorf("decode %s: unexpected type %s", requiredType.String(), mtype.String())
 	}
 
 	return schema, nil

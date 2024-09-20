@@ -97,7 +97,7 @@ func TestNode_Leader(t *testing.T) {
 	conn := newClient(t)
 
 	// Make a Leader request
-	buf := makeClientRequest(t, conn, protocol.RequestLeader)
+	buf := makeClientRequest(t, conn, byte(protocol.RequestLeader))
 	assert.Equal(t, uint8(1), buf[0])
 
 	require.NoError(t, conn.Close())
@@ -112,6 +112,7 @@ func TestNode_Autorecovery(t *testing.T) {
 	defer server.Close()
 
 	err = server.SetAutoRecovery(false)
+	require.NoError(t, err)
 }
 
 // func TestNode_Heartbeat(t *testing.T) {

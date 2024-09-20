@@ -7,16 +7,11 @@ const VersionOne = uint64(1)
 const VersionLegacy = uint64(0x86104dd760433fe5)
 
 // Cluster response formats
-const (
-	ClusterFormatV0 = 0
-	ClusterFormatV1 = 1
-)
+type ClusterFormat uint64
 
-// Node roles
 const (
-	Voter   = NodeRole(0)
-	StandBy = NodeRole(1)
-	Spare   = NodeRole(2)
+	ClusterFormatV0 ClusterFormat = 0
+	ClusterFormatV1 ClusterFormat = 1
 )
 
 type ColumnType uint8
@@ -58,54 +53,33 @@ func (t ColumnType) String() string {
 	}
 }
 
+type RequestType uint8
+
 // Request types.
 const (
-	RequestLeader    = 0
-	RequestClient    = 1
-	RequestHeartbeat = 2
-	RequestOpen      = 3
-	RequestPrepare   = 4
-	RequestExec      = 5
-	RequestQuery     = 6
-	RequestFinalize  = 7
-	RequestExecSQL   = 8
-	RequestQuerySQL  = 9
-	RequestInterrupt = 10
-	RequestAdd       = 12
-	RequestAssign    = 13
-	RequestRemove    = 14
-	RequestDump      = 15
-	RequestCluster   = 16
-	RequestTransfer  = 17
-	RequestDescribe  = 18
-	RequestWeight    = 19
+	RequestLeader    RequestType = 0
+	RequestClient    RequestType = 1
+	RequestHeartbeat RequestType = 2
+	RequestOpen      RequestType = 3
+	RequestPrepare   RequestType = 4
+	RequestExec      RequestType = 5
+	RequestQuery     RequestType = 6
+	RequestFinalize  RequestType = 7
+	RequestExecSQL   RequestType = 8
+	RequestQuerySQL  RequestType = 9
+	RequestInterrupt RequestType = 10
+	RequestAdd       RequestType = 12
+	RequestAssign    RequestType = 13
+	RequestRemove    RequestType = 14
+	RequestDump      RequestType = 15
+	RequestCluster   RequestType = 16
+	RequestTransfer  RequestType = 17
+	RequestDescribe  RequestType = 18
+	RequestWeight    RequestType = 19
 )
 
-// Formats
-const (
-	RequestDescribeFormatV0 = 0
-)
-
-// Response types.
-const (
-	ResponseFailure    = 0
-	ResponseNode       = 1
-	ResponseNodeLegacy = 1
-	ResponseWelcome    = 2
-	ResponseNodes      = 3
-	ResponseDb         = 4
-	ResponseStmt       = 5
-	ResponseResult     = 6
-	ResponseRows       = 7
-	ResponseEmpty      = 8
-	ResponseFiles      = 9
-	ResponseMetadata   = 10
-)
-
-// Human-readable description of a request type.
-func requestDesc(code uint8) string {
-	switch code {
-	// Requests
+func (request RequestType) String() string {
+	switch request {
 	case RequestLeader:
 		return "leader"
 	case RequestClient:
@@ -142,13 +116,39 @@ func requestDesc(code uint8) string {
 		return "transfer"
 	case RequestDescribe:
 		return "describe"
+	default:
+		return "unknown"
 	}
-	return "unknown"
 }
 
+type DescribeFormat uint64
+
+// Formats
+const (
+	RequestDescribeFormatV0 DescribeFormat = 0
+)
+
+type ResponseType uint8
+
+// Response types.
+const (
+	ResponseFailure    ResponseType = 0
+	ResponseNode       ResponseType = 1
+	ResponseNodeLegacy ResponseType = 1
+	ResponseWelcome    ResponseType = 2
+	ResponseNodes      ResponseType = 3
+	ResponseDb         ResponseType = 4
+	ResponseStmt       ResponseType = 5
+	ResponseResult     ResponseType = 6
+	ResponseRows       ResponseType = 7
+	ResponseEmpty      ResponseType = 8
+	ResponseFiles      ResponseType = 9
+	ResponseMetadata   ResponseType = 10
+)
+
 // Human-readable description of a response type.
-func responseDesc(code uint8) string {
-	switch code {
+func (response ResponseType) String() string {
+	switch response {
 	case ResponseFailure:
 		return "failure"
 	case ResponseNode:
@@ -171,6 +171,7 @@ func responseDesc(code uint8) string {
 		return "files"
 	case ResponseMetadata:
 		return "metadata"
+	default:
+		return "unknown"
 	}
-	return "unknown"
 }

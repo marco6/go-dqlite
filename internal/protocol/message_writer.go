@@ -23,7 +23,7 @@ func NewMessageWriter(writer io.Writer) *messageWriter {
 
 func (mw *messageWriter) WriteAdd(id uint64, address string) error {
 	messageSize := 8 + // id
-		alignUp(len(address)+1, messageWordSize)
+		stringSize(address)
 
 	if err := mw.writeHeader(messageSize, RequestAdd, 0); err != nil {
 		return err
@@ -63,23 +63,23 @@ func (mw *messageWriter) WriteTransfer(id uint64) error {
 	return mw.writer.Flush()
 }
 
-func (mw *messageWriter) WriteCluster(formatVersion uint64) error {
+func (mw *messageWriter) WriteCluster(formatVersion ClusterFormat) error {
 	const messageSize = messageWordSize
 	if err := mw.writeHeader(messageSize, RequestCluster, 0); err != nil {
 		return err
 	}
-	if err := mw.writeUint64(formatVersion); err != nil {
+	if err := mw.writeUint64(uint64(formatVersion)); err != nil {
 		return err
 	}
 	return mw.writer.Flush()
 }
 
-func (mw *messageWriter) WriteDescribe(formatVersion uint64) error {
+func (mw *messageWriter) WriteDescribe(formatVersion DescribeFormat) error {
 	const messageSize = messageWordSize
 	if err := mw.writeHeader(messageSize, RequestDescribe, 0); err != nil {
 		return err
 	}
-	if err := mw.writeUint64(formatVersion); err != nil {
+	if err := mw.writeUint64(uint64(formatVersion)); err != nil {
 		return err
 	}
 	return mw.writer.Flush()
@@ -136,7 +136,7 @@ func (mw *messageWriter) WriteClient(id uint64) error {
 }
 
 func (mw *messageWriter) WriteDump(name string) error {
-	messageSize := alignUp(len(name)+1, messageWordSize)
+	messageSize := stringSize(name)
 	if err := mw.writeHeader(messageSize, RequestDump, 0); err != nil {
 		return err
 	}
@@ -155,9 +155,9 @@ func (mw *messageWriter) WriteExecSQL(db uint32, query string, args []driver.Nam
 	return mw.writeQuerySQL(RequestExecSQL, db, query, args)
 }
 
-func (mw *messageWriter) writeQuerySQL(mtype uint8, db uint32, query string, args []driver.NamedValue) error {
+func (mw *messageWriter) writeQuerySQL(mtype RequestType, db uint32, query string, args []driver.NamedValue) error {
 	messageSize := 8 + // database id
-		alignUp(len(query)+1, messageWordSize) + // query length
+		stringSize(query) +
 		measureNamedValues(args)
 
 	version := uint8(0)
@@ -187,7 +187,7 @@ func (mw *messageWriter) WriteExec(db, query uint32, args []driver.NamedValue) e
 	return mw.writeQuery(RequestExec, db, query, args)
 }
 
-func (mw *messageWriter) writeQuery(mtype uint8, db, query uint32, args []driver.NamedValue) error {
+func (mw *messageWriter) writeQuery(mtype RequestType, db, query uint32, args []driver.NamedValue) error {
 	messageSize := 4 + // database id
 		4 + // query id
 		measureNamedValues(args)
@@ -230,9 +230,9 @@ func (mw *messageWriter) WriteFinalize(dbId, stmtId uint32) error {
 }
 
 func (mw *messageWriter) WriteOpen(name string, flags uint64, vfs string) error {
-	messageSize := alignUp(len(name)+1, messageWordSize) +
+	messageSize := stringSize(name) +
 		8 + // flags
-		alignUp(len(vfs)+1, messageWordSize)
+		stringSize(vfs)
 
 	if err := mw.writeHeader(messageSize, RequestOpen, 0); err != nil {
 		return err
@@ -252,7 +252,7 @@ func (mw *messageWriter) WriteOpen(name string, flags uint64, vfs string) error 
 
 func (mw *messageWriter) WritePrepare(db uint32, sql string) error {
 	messageSize := 8 + // db
-		alignUp(len(sql)+1, messageWordSize)
+		stringSize(sql)
 
 	if err := mw.writeHeader(messageSize, RequestPrepare, 0); err != nil {
 		return err
@@ -267,7 +267,7 @@ func (mw *messageWriter) WritePrepare(db uint32, sql string) error {
 	return mw.writer.Flush()
 }
 
-func (mw *messageWriter) writeHeader(messageSize int, mtype, version uint8) error {
+func (mw *messageWriter) writeHeader(messageSize int, mtype RequestType, version uint8) error {
 	if messageSize < 0 {
 		return fmt.Errorf("message size is negative")
 	}
@@ -279,7 +279,7 @@ func (mw *messageWriter) writeHeader(messageSize int, mtype, version uint8) erro
 	}
 	header := mw.writer.AvailableBuffer()
 	header = binary.LittleEndian.AppendUint32(header, uint32(messageSize/messageWordSize))
-	header = append(header, mtype, version, 0, 0)
+	header = append(header, byte(mtype), version, 0, 0)
 	_, err := mw.writer.Write(header)
 	return err
 }
@@ -426,4 +426,8 @@ func (mw *messageWriter) writeFloat64(v float64) error {
 
 func appendPadding(buff []byte) []byte {
 	return append(buff, make([]byte, alignUp(len(buff), messageWordSize)-len(buff))...)
+}
+
+func stringSize(s string) int {
+	return alignUp(len(s)+1, messageWordSize)
 }

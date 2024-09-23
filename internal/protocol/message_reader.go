@@ -22,7 +22,7 @@ func NewMessageReader(reader io.Reader) *messageReader {
 		N: 0,
 	}
 	return &messageReader{
-		reader: bufio.NewReader(limitedReader),
+		reader: bufio.NewReaderSize(limitedReader, 4096*2),
 		limit:  &limitedReader.N,
 	}
 }
